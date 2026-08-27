@@ -1,0 +1,86 @@
+{
+  "id": "errorHandler03",
+  "name": "Error handler - one place, every workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "c3000000-0000-4000-8000-000000000001",
+      "name": "Any workflow failed",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [-600, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Set this workflow as the Error Workflow on every other workflow, so a\n// failure anywhere lands here instead of each pipeline growing its own\n// half-copied error branch that drifts out of sync.\n// The dedupe_key is carried through so a failure can be tied back to the\n// exact lead that caused it, not just to a node name.\nconst e = items[0].json;\nconst last = (e.execution && e.execution.lastNodeExecuted) || 'unknown node';\nconst msg = (e.execution && e.execution.error && e.execution.error.message) || 'no message';\nconst wf = (e.workflow && e.workflow.name) || 'unknown workflow';\n\nreturn [{ json: {\n  workflow: wf,\n  node: last,\n  message: String(msg).slice(0, 500),\n  execution_url: (e.execution && e.execution.url) || null,\n  dedupe_key: (e.execution && e.execution.data && e.execution.data.dedupe_key) || null,\n  severity: /timeout|ECONNRESET|rate limit|429|503/i.test(msg) ? 'transient' : 'hard'\n} }];"
+      },
+      "id": "c3000000-0000-4000-8000-000000000002",
+      "name": "Shape the failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-380, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO pipeline_failures (workflow, node, message, severity, dedupe_key, failed_at)\nVALUES ($1, $2, $3, $4, $5, now());",
+        "options": { "queryReplacement": "={{ $json.workflow }},{{ $json.node }},{{ $json.message }},{{ $json.severity }},{{ $json.dedupe_key }}" }
+      },
+      "id": "c3000000-0000-4000-8000-000000000003",
+      "name": "Log failure",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-160, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            { "value1": "={{ $json.severity }}", "operation": "equals", "value2": "hard" }
+          ]
+        }
+      },
+      "id": "c3000000-0000-4000-8000-000000000004",
+      "name": "Worth waking someone?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [60, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ALERT_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"HARD FAILURE in {{ $json.workflow }} at node {{ $json.node }}: {{ $json.message }}\"\n}",
+        "options": {}
+      },
+      "id": "c3000000-0000-4000-8000-000000000005",
+      "name": "Alert a human",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [280, 200]
+    },
+    {
+      "parameters": {},
+      "id": "c3000000-0000-4000-8000-000000000006",
+      "name": "Transient - logged only",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [280, 400]
+    }
+  ],
+  "connections": {
+    "Any workflow failed": { "main": [[{ "node": "Shape the failure", "type": "main", "index": 0 }]] },
+    "Shape the failure": { "main": [[{ "node": "Log failure", "type": "main", "index": 0 }]] },
+    "Log failure": { "main": [[{ "node": "Worth waking someone?", "type": "main", "index": 0 }]] },
+    "Worth waking someone?": {
+      "main": [
+        [{ "node": "Alert a human", "type": "main", "index": 0 }],
+        [{ "node": "Transient - logged only", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

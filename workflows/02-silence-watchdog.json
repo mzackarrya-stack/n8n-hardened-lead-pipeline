@@ -1,0 +1,104 @@
+{
+  "id": "silenceWatchdog02",
+  "name": "Watchdog - detect a silent intake",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 15 }]
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000001",
+      "name": "Every 15 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [-600, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- The whole point: this reads a table the PIPELINE writes, not n8n's own\n-- execution log. A trigger that stops firing produces no execution and no\n-- error, so n8n has nothing to report - the log looks perfectly healthy.\n-- Absence of a heartbeat is the only evidence that survives that failure.\nSELECT name,\n       last_success,\n       EXTRACT(EPOCH FROM (now() - last_success)) / 60 AS silent_minutes\n  FROM pipeline_heartbeat\n WHERE name = 'lead_intake';",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000002",
+      "name": "Read heartbeat",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-380, 300],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Two failure shapes, not one:\n//  - the heartbeat row is STALE  -> the pipeline stopped succeeding;\n//  - the heartbeat row is MISSING -> it never ran at all, which is the case\n//    people forget to handle and the one that hides longest.\n// A threshold that ignores business hours cries wolf every night, so the\n// quiet window is widened outside working hours instead of being disabled.\nconst rows = items.filter(i => i.json && i.json.last_success);\nconst hour = new Date().getUTCHours();\nconst businessHours = hour >= 6 && hour < 19;\nconst limit = businessHours ? 45 : 240;\n\nif (rows.length === 0) {\n  return [{ json: {\n    alarm: true,\n    silent_minutes: null,\n    limit_minutes: limit,\n    reason: 'no heartbeat row at all - the intake has never completed a run'\n  } }];\n}\n\nconst silent = Math.round(Number(rows[0].json.silent_minutes));\nreturn [{ json: {\n  alarm: silent > limit,\n  silent_minutes: silent,\n  limit_minutes: limit,\n  last_success: rows[0].json.last_success,\n  reason: silent > limit\n    ? `no successful run for ${silent} min (limit ${limit})`\n    : 'healthy'\n} }];"
+      },
+      "id": "b2000000-0000-4000-8000-000000000003",
+      "name": "Judge silence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.alarm }}", "value2": true }]
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000004",
+      "name": "Gone quiet?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [60, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ALERT_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"INTAKE SILENT - {{ $json.reason }}. Last success: {{ $json.last_success }}\"\n}",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000005",
+      "name": "Alert - intake is silent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [280, 200],
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Record that we alerted, so a follow-up workflow can escalate if the\n-- silence is still there an hour later instead of repeating the same ping.\nINSERT INTO watchdog_alerts (name, silent_minutes, raised_at)\nVALUES ('lead_intake', {{ $json.silent_minutes || 0 }}, now());",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000006",
+      "name": "Log the alarm",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [500, 200]
+    },
+    {
+      "parameters": {},
+      "id": "b2000000-0000-4000-8000-000000000007",
+      "name": "Healthy - nothing to do",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [280, 400]
+    }
+  ],
+  "connections": {
+    "Every 15 minutes": { "main": [[{ "node": "Read heartbeat", "type": "main", "index": 0 }]] },
+    "Read heartbeat": { "main": [[{ "node": "Judge silence", "type": "main", "index": 0 }]] },
+    "Judge silence": { "main": [[{ "node": "Gone quiet?", "type": "main", "index": 0 }]] },
+    "Gone quiet?": {
+      "main": [
+        [{ "node": "Alert - intake is silent", "type": "main", "index": 0 }],
+        [{ "node": "Healthy - nothing to do", "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert - intake is silent": { "main": [[{ "node": "Log the alarm", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}
