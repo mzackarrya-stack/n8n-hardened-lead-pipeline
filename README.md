@@ -226,3 +226,6 @@ fired its alert, and looked perfectly healthy for weeks, because nobody had chec
 whether a signal that has never triggered actually works.
 
 MIT licensed. Use it, fork it, tell me what breaks.
+
+Need this wired to your own inbox, CRM and database? I do it at a fixed price, in writing:
+[n8n workflow, built and handed over](https://contra.com/s/QqmlXN3F-your-n8n-workflow-built-tested-and-handed-over).
